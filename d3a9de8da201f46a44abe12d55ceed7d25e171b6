@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "38b81d30_ef658d68",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000017
+      },
+      "writtenOn": "2023-08-07T12:38:25Z",
+      "side": 1,
+      "message": "fixes pdx20x camera breakage related to\n\nhttps://github.com/LineageOS/android_device_sony_sm8250-common/commit/5038b42d8e1bf225236fc99848e33a79427ed6b2",
+      "revId": "d3a9de8da201f46a44abe12d55ceed7d25e171b6",
+      "serverId": "b49086b3-c06c-47ea-b69e-65c8379e1be6"
+    }
+  ]
+}
