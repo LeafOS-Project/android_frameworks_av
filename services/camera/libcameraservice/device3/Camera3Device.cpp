@@ -45,6 +45,7 @@
 #include <utility>
 
 #include <android-base/stringprintf.h>
+#include <sched.h>
 #include <utils/Log.h>
 #include <utils/Trace.h>
 #include <utils/Timers.h>
@@ -2387,10 +2388,15 @@ bool Camera3Device::reconfigureCamera(const CameraMetadata& sessionParams, int c
     return ret;
 }
 
+
 status_t Camera3Device::configureStreamsLocked(int operatingMode,
         const CameraMetadata& sessionParams, bool notifyRequestThread) {
     ATRACE_CALL();
     status_t res;
+    // Stream/surface setup can include a lot of binder IPC. Raise the
+    // thread priority when running the binder IPC heavy configuration
+    // sequence.
+    RunThreadWithRealtimePriority priorityBump;
 
     if (mStatus != STATUS_UNCONFIGURED && mStatus != STATUS_CONFIGURED) {
         CLOGE("Not idle");
@@ -2582,6 +2588,7 @@ status_t Camera3Device::configureStreamsLocked(int operatingMode,
         }
         mRequestThread->setHalBufferManagedStreams(mHalBufManagedStreamIds);
     }
+
     // Finish all stream configuration immediately.
     // TODO: Try to relax this later back to lazy completion, which should be
     // faster
@@ -2590,8 +2597,8 @@ status_t Camera3Device::configureStreamsLocked(int operatingMode,
         bool streamReConfigured = false;
         res = mInputStream->finishConfiguration(&streamReConfigured);
         if (res != OK) {
-            CLOGE("Can't finish configuring input stream %d: %s (%d)",
-                    mInputStream->getId(), strerror(-res), res);
+            CLOGE("Can't finish configuring input stream %d: %s (%d)", mInputStream->getId(),
+                  strerror(-res), res);
             cancelStreamsConfigurationLocked();
             if ((res == NO_INIT || res == DEAD_OBJECT) && mInputStream->isAbandoned()) {
                 return DEAD_OBJECT;
@@ -2609,8 +2616,8 @@ status_t Camera3Device::configureStreamsLocked(int operatingMode,
             bool streamReConfigured = false;
             res = outputStream->finishConfiguration(&streamReConfigured);
             if (res != OK) {
-                CLOGE("Can't finish configuring output stream %d: %s (%d)",
-                        outputStream->getId(), strerror(-res), res);
+                CLOGE("Can't finish configuring output stream %d: %s (%d)", outputStream->getId(),
+                      strerror(-res), res);
                 cancelStreamsConfigurationLocked();
                 if ((res == NO_INIT || res == DEAD_OBJECT) && outputStream->isAbandoned()) {
                     return DEAD_OBJECT;
@@ -2638,8 +2645,8 @@ status_t Camera3Device::configureStreamsLocked(int operatingMode,
     if (disableFifo != 1) {
         // Boost priority of request thread to SCHED_FIFO.
         pid_t requestThreadTid = mRequestThread->getTid();
-        res = SchedulingPolicyUtils::requestPriorityDirect(getpid(), requestThreadTid,
-                kRequestThreadPriority);
+        res = SchedulingPolicyUtils::requestPriorityDirect(
+                getpid(), requestThreadTid, RunThreadWithRealtimePriority::kRequestThreadPriority);
         if (res != OK) {
             ALOGW("Can't set realtime priority for request processing thread: %s (%d)",
                     strerror(-res), res);

@@ -95,7 +95,8 @@ public:
     virtual bool updateOrphanEffectChains(const sp<IAfEffectModule>& effect)
             EXCLUDES_AudioFlinger_Mutex = 0;
     virtual status_t moveEffectChain_ll(audio_session_t sessionId,
-            IAfPlaybackThread* srcThread, IAfPlaybackThread* dstThread)
+            IAfPlaybackThread* srcThread, IAfPlaybackThread* dstThread,
+            IAfEffectChain* srcChain = nullptr)
             REQUIRES(mutex(), audio_utils::ThreadBase_Mutex) = 0;
 
     virtual void requestLogMerge() = 0;
@@ -115,9 +116,11 @@ public:
             const sp<AudioIoDescriptor>& ioDesc,
             pid_t pid = 0) EXCLUDES_AudioFlinger_ClientMutex = 0;
     virtual void onNonOffloadableGlobalEffectEnable() EXCLUDES_AudioFlinger_Mutex = 0;
-    virtual void onSupportedLatencyModesChanged(
-            audio_io_handle_t output, const std::vector<audio_latency_mode_t>& modes)
+    virtual void onSupportedLatencyModesChanged(audio_io_handle_t output,
+                                                const std::vector<audio_latency_mode_t>& modes)
             EXCLUDES_AudioFlinger_ClientMutex = 0;
+
+    virtual void onHardError(std::set<audio_port_handle_t>& trackPortIds) = 0;
 };
 
 class IAfThreadBase : public virtual RefBase {

@@ -389,6 +389,7 @@ TrackHandle::TrackHandle(const sp<IAfTrack>& track)
       mTrack(track)
 {
     setMinSchedulerPolicy(SCHED_NORMAL, ANDROID_PRIORITY_AUDIO);
+    setInheritRt(true);
 }
 
 TrackHandle::~TrackHandle() {
@@ -1880,6 +1881,12 @@ void Track::disable()
     signalClientFlag(CBLK_DISABLED);
 }
 
+bool Track::isDisabled() const {
+    audio_track_cblk_t* cblk = mCblk;
+    return (cblk != nullptr)
+            && ((android_atomic_release_load(&cblk->mFlags) & CBLK_DISABLED) != 0);
+}
+
 void Track::signalClientFlag(int32_t flag)
 {
     // FIXME should use proxy, and needs work
@@ -2641,6 +2648,7 @@ RecordHandle::RecordHandle(
     mRecordTrack(recordTrack)
 {
     setMinSchedulerPolicy(SCHED_NORMAL, ANDROID_PRIORITY_AUDIO);
+    setInheritRt(true);
 }
 
 RecordHandle::~RecordHandle() {

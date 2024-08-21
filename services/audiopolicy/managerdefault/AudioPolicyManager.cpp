@@ -129,8 +129,8 @@ void AudioPolicyManager::broadcastDeviceConnectionState(const sp<DeviceDescripto
     device->toAudioPort(&devicePort);
     if (status_t status = mpClientInterface->setDeviceConnectedState(&devicePort, state);
             status != OK) {
-        ALOGE("Error %d while setting connected state for device %s",
-                static_cast<int>(state),
+        ALOGE("Error %d while setting connected state %d for device %s",
+                status, static_cast<int>(state),
                 device->getDeviceTypeAddr().toString(false).c_str());
     }
 }
@@ -218,9 +218,9 @@ status_t AudioPolicyManager::setDeviceConnectionStateInt(const sp<DeviceDescript
             if (checkOutputsForDevice(device, state, outputs) != NO_ERROR) {
                 mAvailableOutputDevices.remove(device);
 
-                mHwModules.cleanUpForDevice(device);
-
                 broadcastDeviceConnectionState(device, media::DeviceConnectedState::DISCONNECTED);
+
+                mHwModules.cleanUpForDevice(device);
                 return INVALID_OPERATION;
             }
 
@@ -563,14 +563,30 @@ status_t AudioPolicyManager::handleDeviceConfigChange(audio_devices_t device,
         }
     }
     auto musicStrategy = streamToStrategy(AUDIO_STREAM_MUSIC);
+    uint32_t muteWaitMs = 0;
     for (size_t i = 0; i < mOutputs.size(); i++) {
        sp<SwAudioOutputDescriptor> desc = mOutputs.valueAt(i);
-       // mute media strategies and delay device switch by the largest
-       // This avoid sending the music tail into the earpiece or headset.
+       // mute media strategies to avoid sending the music tail into
+       // the earpiece or headset.
+       if (desc->isStrategyActive(musicStrategy)) {
+           uint32_t tempRecommendedMuteDuration = desc->getRecommendedMuteDurationMs();
+           uint32_t tempMuteDurationMs = tempRecommendedMuteDuration > 0 ?
+                        tempRecommendedMuteDuration : desc->latency() * 4;
+           if (muteWaitMs < tempMuteDurationMs) {
+               muteWaitMs = tempMuteDurationMs;
+           }
+       }
        setStrategyMute(musicStrategy, true, desc);
        setStrategyMute(musicStrategy, false, desc, MUTE_TIME_MS,
           mEngine->getOutputDevicesForAttributes(attributes_initializer(AUDIO_USAGE_MEDIA),
                                               nullptr, true /*fromCache*/).types());
+    }
+    // Wait for the muted audio to propagate down the audio path see checkDeviceMuteStrategies().
+    // We assume that MUTE_TIME_MS is way larger than muteWaitMs so that unmuting still
+    // happens after the actual device switch.
+    if (muteWaitMs > 0) {
+        ALOGW_IF(MUTE_TIME_MS < muteWaitMs * 2, "%s excessive mute wait %d", __func__, muteWaitMs);
+        usleep(muteWaitMs * 1000);
     }
     // Toggle the device state: UNAVAILABLE -> AVAILABLE
     // This will force reading again the device configuration
@@ -744,7 +760,7 @@ status_t AudioPolicyManager::updateCallRoutingInternal(
         }
         muteWaitMs = setOutputDevices(__func__, mPrimaryOutput, rxDevices, true, delayMs);
     } else { // create RX path audio patch
-        connectTelephonyRxAudioSource();
+        connectTelephonyRxAudioSource(delayMs);
         // If the TX device is on the primary HW module but RX device is
         // on other HW module, SinkMetaData of telephony input should handle it
         // assuming the device uses audio HAL V5.0 and above
@@ -779,7 +795,7 @@ bool AudioPolicyManager::isDeviceOfModule(
     return false;
 }
 
-void AudioPolicyManager::connectTelephonyRxAudioSource()
+void AudioPolicyManager::connectTelephonyRxAudioSource(uint32_t delayMs)
 {
     disconnectTelephonyAudioSource(mCallRxSourceClient);
     const struct audio_port_config source = {
@@ -789,7 +805,7 @@ void AudioPolicyManager::connectTelephonyRxAudioSource()
     const auto aa = mEngine->getAttributesForStreamType(AUDIO_STREAM_VOICE_CALL);
 
     audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE;
-    status_t status = startAudioSource(&source, &aa, &portId, 0 /*uid*/, true /*internal*/);
+    status_t status = startAudioSource(&source, &aa, &portId, 0 /*uid*/, true /*internal*/, delayMs);
     ALOGE_IF(status != OK, "%s: failed to start audio source (%d)", __func__, status);
     mCallRxSourceClient = mAudioSources.valueFor(portId);
     ALOGE_IF(mCallRxSourceClient == nullptr,
@@ -1577,6 +1593,11 @@ status_t AudioPolicyManager::openDirectOutput(audio_stream_type_t stream,
     outputDesc->mDirectClientSession = session;
 
     addOutput(*output, outputDesc);
+    setOutputDevices(__func__, outputDesc,
+                     devices,
+                     true,
+                     0,
+                     NULL);
     mPreviousOutputs = mOutputs;
     ALOGV("%s returns new direct output %d", __func__, *output);
     mpClientInterface->onAudioPortListUpdate();
@@ -1638,12 +1659,14 @@ audio_io_handle_t AudioPolicyManager::getOutputForDevices(
     }
 
     // Use the spatializer output if the content can be spatialized, no preferred mixer
-    // was specified and offload or direct playback is not explicitly requested.
+    // was specified and offload or direct playback is not explicitly requested, and there is no
+    // haptic channel included in playback
     *isSpatialized = false;
-    if (mSpatializerOutput != nullptr
-            && canBeSpatializedInt(attr, config, devices.toTypeAddrVector())
-            && prefMixerConfigInfo == nullptr
-            && ((*flags & (AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD | AUDIO_OUTPUT_FLAG_DIRECT)) == 0)) {
+    if (mSpatializerOutput != nullptr &&
+        canBeSpatializedInt(attr, config, devices.toTypeAddrVector()) &&
+        prefMixerConfigInfo == nullptr &&
+        ((*flags & (AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD | AUDIO_OUTPUT_FLAG_DIRECT)) == 0) &&
+        checkHapticCompatibilityOnSpatializerOutput(config, session)) {
         *isSpatialized = true;
         return mSpatializerOutput->mIoHandle;
     }
@@ -2069,6 +2092,8 @@ audio_io_handle_t AudioPolicyManager::selectOutput(const SortedVector<audio_io_h
     // matching criteria values in priority order for best matching output so far
     std::vector<uint32_t> bestMatchCriteria(8, 0);
 
+    const bool hasOrphanHaptic =
+            mEffects.hasOrphanEffectsForSessionAndType(sessionId, FX_IID_HAPTICGENERATOR);
     const uint32_t channelCount = audio_channel_count_from_out_mask(channelMask);
     const uint32_t hapticChannelCount = audio_channel_count_from_out_mask(
         channelMask & AUDIO_CHANNEL_HAPTIC_ALL);
@@ -2089,13 +2114,20 @@ audio_io_handle_t AudioPolicyManager::selectOutput(const SortedVector<audio_io_h
         // When using haptic output, same audio format and sample rate are required.
         const uint32_t outputHapticChannelCount = audio_channel_count_from_out_mask(
             outputDesc->getChannelMask() & AUDIO_CHANNEL_HAPTIC_ALL);
-        if ((hapticChannelCount == 0) != (outputHapticChannelCount == 0)) {
+        // skip if haptic channel specified but output does not support it, or output support haptic
+        // but there is no haptic channel requested AND no orphan haptic effect exist
+        if ((hapticChannelCount != 0 && outputHapticChannelCount == 0) ||
+            (hapticChannelCount == 0 && outputHapticChannelCount != 0 && !hasOrphanHaptic)) {
             continue;
         }
-        if (outputHapticChannelCount >= hapticChannelCount
-            && format == outputDesc->getFormat()
-            && samplingRate == outputDesc->getSamplingRate()) {
-                currentMatchCriteria[0] = outputHapticChannelCount;
+        // In the case of audio-coupled-haptic playback, there is no format conversion and
+        // resampling in the framework, same format/channel/sampleRate for client and the output
+        // thread is required. In the case of HapticGenerator effect, do not require format
+        // matching.
+        if ((outputHapticChannelCount >= hapticChannelCount && format == outputDesc->getFormat() &&
+             samplingRate == outputDesc->getSamplingRate()) ||
+            (outputHapticChannelCount != 0 && hasOrphanHaptic)) {
+            currentMatchCriteria[0] = outputHapticChannelCount;
         }
 
         // functional flags match
@@ -3177,7 +3209,12 @@ void AudioPolicyManager::releaseInput(audio_port_handle_t portId)
     ALOGV("%s %d", __FUNCTION__, input);
 
     inputDesc->removeClient(portId);
-    mEffects.putOrphanEffects(client->session(), input, &mInputs, mpClientInterface);
+
+    // If no more clients are present in this session, park effects to an orphan chain
+    RecordClientVector clientsOnSession = inputDesc->getClientsForSession(client->session());
+    if (clientsOnSession.size() == 0) {
+        mEffects.putOrphanEffects(client->session(), input, &mInputs, mpClientInterface);
+    }
     if (inputDesc->getClientCount() > 0) {
         ALOGV("%s(%d) %zu clients remaining", __func__, portId, inputDesc->getClientCount());
         return;
@@ -3577,7 +3614,7 @@ status_t AudioPolicyManager::registerEffect(const effect_descriptor_t *desc,
                                 int session,
                                 int id)
 {
-    if (session != AUDIO_SESSION_DEVICE) {
+    if (session != AUDIO_SESSION_DEVICE && io != AUDIO_IO_HANDLE_NONE) {
         ssize_t index = mOutputs.indexOfKey(io);
         if (index < 0) {
             index = mInputs.indexOfKey(io);
@@ -5606,7 +5643,7 @@ status_t AudioPolicyManager::acquireSoundTriggerSession(audio_session_t *session
 status_t AudioPolicyManager::startAudioSource(const struct audio_port_config *source,
                                               const audio_attributes_t *attributes,
                                               audio_port_handle_t *portId,
-                                              uid_t uid, bool internal)
+                                              uid_t uid, bool internal, uint32_t delayMs)
 {
     ALOGV("%s", __FUNCTION__);
     *portId = AUDIO_PORT_HANDLE_NONE;
@@ -5641,14 +5678,15 @@ status_t AudioPolicyManager::startAudioSource(const struct audio_port_config *so
                                    mEngine->getProductStrategyForAttributes(*attributes),
                                    toVolumeSource(*attributes), internal);
 
-    status_t status = connectAudioSource(sourceDesc);
+    status_t status = connectAudioSource(sourceDesc, delayMs);
     if (status == NO_ERROR) {
         mAudioSources.add(*portId, sourceDesc);
     }
     return status;
 }
 
-status_t AudioPolicyManager::connectAudioSource(const sp<SourceClientDescriptor>& sourceDesc)
+status_t AudioPolicyManager::connectAudioSource(const sp<SourceClientDescriptor>& sourceDesc,
+                                                uint32_t delayMs)
 {
     ALOGV("%s handle %d", __FUNCTION__, sourceDesc->portId());
 
@@ -5674,7 +5712,7 @@ status_t AudioPolicyManager::connectAudioSource(const sp<SourceClientDescriptor>
     audio_patch_handle_t handle = AUDIO_PATCH_HANDLE_NONE;
 
     return connectAudioSourceToSink(
-                sourceDesc, sinkDevice, patchBuilder.patch(), handle, mUidCached, 0 /*delayMs*/);
+                sourceDesc, sinkDevice, patchBuilder.patch(), handle, mUidCached, delayMs);
 }
 
 status_t AudioPolicyManager::stopAudioSource(audio_port_handle_t portId)
@@ -6087,6 +6125,34 @@ bool AudioPolicyManager::canBeSpatializedInt(const audio_attributes_t *attr,
     return true;
 }
 
+// The Spatializer output is compatible with Haptic use cases if:
+// 1. the Spatializer output thread supports Haptic, and format/sampleRate are same
+// with client if client haptic channel bits were set, or
+// 2. the Spatializer output thread does not support Haptic, and client did not ask haptic by
+// including the haptic bits or creating the HapticGenerator effect for same session.
+bool AudioPolicyManager::checkHapticCompatibilityOnSpatializerOutput(
+        const audio_config_t* config, audio_session_t sessionId) const {
+    const auto clientHapticChannel =
+            audio_channel_count_from_out_mask(config->channel_mask & AUDIO_CHANNEL_HAPTIC_ALL);
+    const auto threadOutputHapticChannel = audio_channel_count_from_out_mask(
+            mSpatializerOutput->getChannelMask() & AUDIO_CHANNEL_HAPTIC_ALL);
+
+    if (threadOutputHapticChannel) {
+        // check format and sampleRate match if client haptic channel mask exist
+        if (clientHapticChannel) {
+            return mSpatializerOutput->getFormat() == config->format &&
+                   mSpatializerOutput->getSamplingRate() == config->sample_rate;
+        }
+        return true;
+    } else {
+        // in the case of the Spatializer output channel mask does not have haptic channel bits, it
+        // means haptic use cases (either the client channelmask includes haptic bits, or created a
+        // HapticGenerator effect for this session) are not supported.
+        return clientHapticChannel == 0 &&
+               !mEffects.hasOrphanEffectsForSessionAndType(sessionId, FX_IID_HAPTICGENERATOR);
+    }
+}
+
 void AudioPolicyManager::checkVirtualizerClientRoutes() {
     std::set<audio_stream_type_t> streamsToInvalidate;
     for (size_t i = 0; i < mOutputs.size(); i++) {
@@ -6471,6 +6537,15 @@ void AudioPolicyManager::onNewAudioModulesAvailableInt(DeviceVector *newDevices)
         if ((desc->mFlags & AUDIO_OUTPUT_FLAG_SPATIALIZER) != 0
                 && !isOutputOnlyAvailableRouteToSomeDevice(desc)) {
             outputsClosed.push_back(desc->mIoHandle);
+            nextAudioPortGeneration();
+            ssize_t index = mAudioPatches.indexOfKey(desc->getPatchHandle());
+            if (index >= 0) {
+                sp<AudioPatch> patchDesc = mAudioPatches.valueAt(index);
+                (void) /*status_t status*/ mpClientInterface->releaseAudioPatch(
+                            patchDesc->getAfHandle(), 0);
+                mAudioPatches.removeItemsAt(index);
+                mpClientInterface->onAudioPatchListUpdate();
+            }
             desc->close();
         }
     }
@@ -8536,7 +8611,11 @@ sp<SwAudioOutputDescriptor> AudioPolicyManager::openOutputWithProfileAndDevice(
     }
 
     addOutput(output, desc);
-
+    setOutputDevices(__func__, desc,
+                     devices,
+                     true,
+                     0,
+                     NULL);
     sp<DeviceDescriptor> speaker = mAvailableOutputDevices.getDevice(
             AUDIO_DEVICE_OUT_SPEAKER, String8(""), AUDIO_FORMAT_DEFAULT);
 

@@ -475,8 +475,8 @@ INSTANTIATE_TEST_CASE_P(
         MsdAudioPatchCount,
         AudioPolicyManagerTestMsd,
         ::testing::Values(
-                MsdAudioPatchCountSpecification(1u, "single"),
-                MsdAudioPatchCountSpecification(2u, "dual")
+                MsdAudioPatchCountSpecification(2u, "single"),
+                MsdAudioPatchCountSpecification(3u, "dual")
         ),
         [](const ::testing::TestParamInfo<MsdAudioPatchCountSpecification> &info) {
                 return std::get<MSD_AUDIO_PATCH_COUNT_NAME_INDEX>(info.param); }
@@ -503,7 +503,7 @@ void AudioPolicyManagerTestMsd::SetUpManagerConfig() {
     mConfig->addDevice(mMsdOutputDevice);
     mConfig->addDevice(mMsdInputDevice);
 
-    if (mExpectedAudioPatchCount == 2) {
+    if (mExpectedAudioPatchCount == 3) {
         // Add SPDIF device with PCM output profile as a second device for dual MSD audio patching.
         mSpdifDevice = new DeviceDescriptor(AUDIO_DEVICE_OUT_SPDIF);
         mSpdifDevice->addAudioProfile(pcmOutputProfile);
@@ -556,7 +556,7 @@ void AudioPolicyManagerTestMsd::SetUpManagerConfig() {
             addOutputProfile(primaryEncodedOutputProfile);
 
     mDefaultOutputDevice = mConfig->getDefaultOutputDevice();
-    if (mExpectedAudioPatchCount == 2) {
+    if (mExpectedAudioPatchCount == 3) {
         mSpdifDevice->addAudioProfile(dtsOutputProfile);
         primaryEncodedOutputProfile->addSupportedDevice(mSpdifDevice);
     }
@@ -605,7 +605,7 @@ TEST_P(AudioPolicyManagerTestMsd, PatchCreationOnSetForceUse) {
     const PatchCountCheck patchCount = snapshotPatchCount();
     mManager->setForceUse(AUDIO_POLICY_FORCE_FOR_ENCODED_SURROUND,
             AUDIO_POLICY_FORCE_ENCODED_SURROUND_ALWAYS);
-    ASSERT_EQ(mExpectedAudioPatchCount, patchCount.deltaFromSnapshot());
+    ASSERT_EQ(mExpectedAudioPatchCount -1 , patchCount.deltaFromSnapshot());
 }
 
 TEST_P(AudioPolicyManagerTestMsd, PatchCreationSetReleaseMsdOutputPatches) {
@@ -613,15 +613,15 @@ TEST_P(AudioPolicyManagerTestMsd, PatchCreationSetReleaseMsdOutputPatches) {
     DeviceVector devices = mManager->getAvailableOutputDevices();
     // Remove MSD output device to avoid patching to itself
     devices.remove(mMsdOutputDevice);
-    ASSERT_EQ(mExpectedAudioPatchCount, devices.size());
+    ASSERT_EQ(mExpectedAudioPatchCount -1 , devices.size());
     mManager->setMsdOutputPatches(&devices);
-    ASSERT_EQ(mExpectedAudioPatchCount, patchCount.deltaFromSnapshot());
+    ASSERT_EQ(mExpectedAudioPatchCount - 1, patchCount.deltaFromSnapshot());
     // Dual patch: exercise creating one new audio patch and reusing another existing audio patch.
     DeviceVector singleDevice(devices[0]);
     mManager->releaseMsdOutputPatches(singleDevice);
-    ASSERT_EQ(mExpectedAudioPatchCount - 1, patchCount.deltaFromSnapshot());
+    ASSERT_EQ(mExpectedAudioPatchCount - 2, patchCount.deltaFromSnapshot());
     mManager->setMsdOutputPatches(&devices);
-    ASSERT_EQ(mExpectedAudioPatchCount, patchCount.deltaFromSnapshot());
+    ASSERT_EQ(mExpectedAudioPatchCount - 1, patchCount.deltaFromSnapshot());
     mManager->releaseMsdOutputPatches(devices);
     ASSERT_EQ(0, patchCount.deltaFromSnapshot());
 }
@@ -641,7 +641,7 @@ TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrPcmRoutesToMsd) {
     getOutputForAttr(&selectedDeviceId,
             AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, k48000SamplingRate);
     ASSERT_EQ(selectedDeviceId, mDefaultOutputDevice->getId());
-    ASSERT_EQ(mExpectedAudioPatchCount, patchCount.deltaFromSnapshot());
+    ASSERT_EQ(mExpectedAudioPatchCount - 1, patchCount.deltaFromSnapshot());
 }
 
 TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrEncodedPlusPcmRoutesToMsd) {
@@ -664,7 +664,7 @@ TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrUnsupportedFormatBypassesMsd) 
     getOutputForAttr(&selectedDeviceId, AUDIO_FORMAT_DTS, AUDIO_CHANNEL_OUT_5POINT1,
             k48000SamplingRate, AUDIO_OUTPUT_FLAG_DIRECT);
     ASSERT_NE(selectedDeviceId, mMsdOutputDevice->getId());
-    ASSERT_EQ(0, patchCount.deltaFromSnapshot());
+    ASSERT_EQ(1, patchCount.deltaFromSnapshot());
 }
 
 TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrFormatSwitching) {
@@ -678,7 +678,7 @@ TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrFormatSwitching) {
         ASSERT_EQ(selectedDeviceId, mDefaultOutputDevice->getId());
         ASSERT_EQ(mExpectedAudioPatchCount, patchCount.deltaFromSnapshot());
         mManager->releaseOutput(portId);
-        ASSERT_EQ(mExpectedAudioPatchCount, patchCount.deltaFromSnapshot());
+        ASSERT_EQ(mExpectedAudioPatchCount - 1, patchCount.deltaFromSnapshot());
     }
     {
         const PatchCountCheck patchCount = snapshotPatchCount();
@@ -687,7 +687,7 @@ TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrFormatSwitching) {
         getOutputForAttr(&selectedDeviceId, AUDIO_FORMAT_DTS, AUDIO_CHANNEL_OUT_5POINT1,
                 k48000SamplingRate, AUDIO_OUTPUT_FLAG_DIRECT, nullptr /*output*/, &portId);
         ASSERT_NE(selectedDeviceId, mMsdOutputDevice->getId());
-        ASSERT_EQ(-static_cast<int>(mExpectedAudioPatchCount), patchCount.deltaFromSnapshot());
+        ASSERT_EQ(-static_cast<int>(mExpectedAudioPatchCount) + 2, patchCount.deltaFromSnapshot());
         mManager->releaseOutput(portId);
         ASSERT_EQ(0, patchCount.deltaFromSnapshot());
     }
@@ -697,7 +697,7 @@ TEST_P(AudioPolicyManagerTestMsd, GetOutputForAttrFormatSwitching) {
         getOutputForAttr(&selectedDeviceId, AUDIO_FORMAT_AC3, AUDIO_CHANNEL_OUT_5POINT1,
                 k48000SamplingRate, AUDIO_OUTPUT_FLAG_DIRECT);
         ASSERT_EQ(selectedDeviceId, mDefaultOutputDevice->getId());
-        ASSERT_EQ(0, patchCount.deltaFromSnapshot());
+        ASSERT_EQ(1, patchCount.deltaFromSnapshot());
     }
 }
 
@@ -2586,6 +2586,116 @@ INSTANTIATE_TEST_CASE_P(
                                             "00:11:22:33:44:55"}),
                 DeviceConnectionTestParams({AUDIO_DEVICE_OUT_BLUETOOTH_SCO, "bt_hfp_out",
                                             "00:11:22:33:44:55"})
+                )
+        );
+
+namespace {
+
+class AudioPolicyManagerTestClientOpenFails : public AudioPolicyManagerTestClient {
+  public:
+    status_t openOutput(audio_module_handle_t module,
+                        audio_io_handle_t *output,
+                        audio_config_t * halConfig,
+                        audio_config_base_t * mixerConfig,
+                        const sp<DeviceDescriptorBase>& device,
+                        uint32_t * latencyMs,
+                        audio_output_flags_t flags) override {
+        return mSimulateFailure ? BAD_VALUE :
+                AudioPolicyManagerTestClient::openOutput(
+                        module, output, halConfig, mixerConfig, device, latencyMs, flags);
+    }
+
+    status_t openInput(audio_module_handle_t module,
+                       audio_io_handle_t *input,
+                       audio_config_t * config,
+                       audio_devices_t * device,
+                       const String8 & address,
+                       audio_source_t source,
+                       audio_input_flags_t flags) override {
+        return mSimulateFailure ? BAD_VALUE :
+                AudioPolicyManagerTestClient::openInput(
+                        module, input, config, device, address, source, flags);
+    }
+
+    void setSimulateFailure(bool simulateFailure) { mSimulateFailure = simulateFailure; }
+
+  private:
+    bool mSimulateFailure = false;
+};
+
+}  // namespace
+
+using DeviceConnectionWithFormatTestParams =
+        std::tuple<audio_devices_t /*type*/, std::string /*name*/, std::string /*address*/,
+        audio_format_t /*format*/>;
+
+class AudioPolicyManagerTestDeviceConnectionFailed :
+        public AudioPolicyManagerTestWithConfigurationFile,
+        public testing::WithParamInterface<DeviceConnectionWithFormatTestParams> {
+  protected:
+    std::string getConfigFile() override { return sBluetoothConfig; }
+  AudioPolicyManagerTestClient* getClient() override {
+        mFullClient = new AudioPolicyManagerTestClientOpenFails;
+        return mFullClient;
+    }
+    void setSimulateOpenFailure(bool simulateFailure) {
+        mFullClient->setSimulateFailure(simulateFailure); }
+
+    static const std::string sBluetoothConfig;
+
+  private:
+    AudioPolicyManagerTestClientOpenFails* mFullClient;
+};
+
+const std::string AudioPolicyManagerTestDeviceConnectionFailed::sBluetoothConfig =
+        AudioPolicyManagerTestDeviceConnectionFailed::sExecutableDir +
+        "test_audio_policy_configuration_bluetooth.xml";
+
+TEST_P(AudioPolicyManagerTestDeviceConnectionFailed, SetDeviceConnectedStateHasAddress) {
+    const audio_devices_t type = std::get<0>(GetParam());
+    const std::string name = std::get<1>(GetParam());
+    const std::string address = std::get<2>(GetParam());
+    const audio_format_t format = std::get<3>(GetParam());
+
+    EXPECT_EQ(0, mClient->getConnectedDevicePortCount());
+    EXPECT_EQ(0, mClient->getDisconnectedDevicePortCount());
+
+    setSimulateOpenFailure(true);
+    ASSERT_EQ(INVALID_OPERATION, mManager->setDeviceConnectionState(
+            type, AUDIO_POLICY_DEVICE_STATE_AVAILABLE,
+            address.c_str(), name.c_str(), format));
+
+    // Since the failure happens when opening input/output, the device must be connected
+    // first and then disconnected.
+    EXPECT_EQ(1, mClient->getConnectedDevicePortCount());
+    EXPECT_EQ(1, mClient->getDisconnectedDevicePortCount());
+
+    if (mClient->getConnectedDevicePortCount() > 0) {
+        auto port = mClient->getLastConnectedDevicePort();
+        EXPECT_EQ(type, port->ext.device.type);
+        EXPECT_EQ(0, strncmp(port->ext.device.address, address.c_str(),
+                        AUDIO_DEVICE_MAX_ADDRESS_LEN)) << "\"" << port->ext.device.address << "\"";
+    }
+    if (mClient->getDisconnectedDevicePortCount() > 0) {
+        auto port = mClient->getLastDisconnectedDevicePort();
+        EXPECT_EQ(type, port->ext.device.type);
+        EXPECT_EQ(0, strncmp(port->ext.device.address, address.c_str(),
+                        AUDIO_DEVICE_MAX_ADDRESS_LEN)) << "\"" << port->ext.device.address << "\"";
+    }
+}
+
+INSTANTIATE_TEST_CASE_P(
+        DeviceConnectionFailure,
+        AudioPolicyManagerTestDeviceConnectionFailed,
+        testing::Values(
+                DeviceConnectionWithFormatTestParams({AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET,
+                            "bt_hfp_in", "00:11:22:33:44:55", AUDIO_FORMAT_DEFAULT}),
+                DeviceConnectionWithFormatTestParams({AUDIO_DEVICE_OUT_BLUETOOTH_SCO,
+                            "bt_hfp_out", "00:11:22:33:44:55", AUDIO_FORMAT_DEFAULT}),
+                DeviceConnectionWithFormatTestParams({AUDIO_DEVICE_OUT_BLUETOOTH_A2DP,
+                            "bt_a2dp_out", "00:11:22:33:44:55", AUDIO_FORMAT_DEFAULT}),
+                DeviceConnectionWithFormatTestParams({AUDIO_DEVICE_OUT_BLUETOOTH_A2DP,
+                            "bt_a2dp_out", "00:11:22:33:44:66", AUDIO_FORMAT_LDAC})
                 )
         );
 

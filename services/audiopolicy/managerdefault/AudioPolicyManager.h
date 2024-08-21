@@ -341,7 +341,8 @@ public:
                                           const audio_attributes_t *attributes,
                                           audio_port_handle_t *portId,
                                           uid_t uid,
-                                          bool internal = false);
+                                          bool internal = false,
+                                          uint32_t delayMs = 0);
         virtual status_t stopAudioSource(audio_port_handle_t portId);
 
         virtual status_t setMasterMono(bool mono);
@@ -683,7 +684,7 @@ protected:
             return mCallTxSourceClient != nullptr && source == mCallTxSourceClient;
         }
 
-        void connectTelephonyRxAudioSource();
+        void connectTelephonyRxAudioSource(uint32_t delayMs);
 
         void disconnectTelephonyAudioSource(sp<SourceClientDescriptor> &clientDesc);
 
@@ -908,7 +909,8 @@ protected:
 
         status_t hasPrimaryOutput() const { return mPrimaryOutput != 0; }
 
-        status_t connectAudioSource(const sp<SourceClientDescriptor>& sourceDesc);
+        status_t connectAudioSource(const sp<SourceClientDescriptor>& sourceDesc,
+                                    uint32_t delayMs = 0);
         status_t disconnectAudioSource(const sp<SourceClientDescriptor>& sourceDesc);
 
         status_t connectAudioSourceToSink(const sp<SourceClientDescriptor>& sourceDesc,
@@ -1358,6 +1360,9 @@ private:
 
         PortHandleVector getClientsForStream(audio_stream_type_t streamType) const;
         void invalidateStreams(StreamTypeVector streams) const;
+
+        bool checkHapticCompatibilityOnSpatializerOutput(const audio_config_t* config,
+                                                         audio_session_t sessionId) const;
 };
 
 };
